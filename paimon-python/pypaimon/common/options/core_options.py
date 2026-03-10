@@ -15,8 +15,11 @@
 #  See the License for the specific language governing permissions and
 # limitations under the License.
 ################################################################################
+import sys
 from enum import Enum
-from typing import Dict
+from typing import Dict, Optional
+
+from datetime import timedelta
 
 from pypaimon.common.memory_size import MemorySize
 from pypaimon.common.options import Options
@@ -104,6 +107,25 @@ class CoreOptions:
         )
     )
 
+    DYNAMIC_BUCKET_TARGET_ROW_NUM: ConfigOption[int] = (
+        ConfigOptions.key("dynamic-bucket.target-row-num")
+        .int_type()
+        .default_value(2000000)
+        .with_description(
+            "In dynamic bucket mode (bucket=-1), target row number per bucket; "
+            "when exceeded, a new bucket is created (aligned with Java SimpleHashBucketAssigner)."
+        )
+    )
+
+    DYNAMIC_BUCKET_MAX_BUCKETS: ConfigOption[int] = (
+        ConfigOptions.key("dynamic-bucket.max-buckets")
+        .int_type()
+        .default_value(-1)
+        .with_description(
+            "In dynamic bucket mode, max buckets per partition. -1 means unlimited."
+        )
+    )
+
     SCAN_MANIFEST_PARALLELISM: ConfigOption[int] = (
         ConfigOptions.key("scan.manifest.parallelism")
         .int_type()
@@ -122,8 +144,18 @@ class CoreOptions:
     FILE_COMPRESSION: ConfigOption[str] = (
         ConfigOptions.key("file.compression")
         .string_type()
-        .default_value("lz4")
-        .with_description("Default file compression format.")
+        .default_value("zstd")
+        .with_description("Default file compression format. For faster read and write, it is recommended to use zstd.")
+    )
+
+    FILE_COMPRESSION_ZSTD_LEVEL: ConfigOption[int] = (
+        ConfigOptions.key("file.compression.zstd-level")
+        .int_type()
+        .default_value(1)
+        .with_description(
+            "Default file compression zstd level. For higher compression rates, it can be configured to 9, "
+            "but the read and write speed will significantly decrease."
+        )
     )
 
     FILE_COMPRESSION_PER_LEVEL: ConfigOption[Dict[str, str]] = (
@@ -164,7 +196,17 @@ class CoreOptions:
         ConfigOptions.key("blob-as-descriptor")
         .boolean_type()
         .default_value(False)
-        .with_description("Whether to use blob as descriptor.")
+        .with_description("Whether to return blob values as serialized BlobDescriptor bytes when reading.")
+    )
+
+    BLOB_DESCRIPTOR_FIELD: ConfigOption[str] = (
+        ConfigOptions.key("blob-descriptor-field")
+        .string_type()
+        .no_default_value()
+        .with_description(
+            "Comma-separated BLOB field names that should be stored as serialized BlobDescriptor bytes "
+            "inline in normal data files."
+        )
     )
 
     TARGET_FILE_SIZE: ConfigOption[MemorySize] = (
@@ -199,6 +241,13 @@ class CoreOptions:
         .string_type()
         .no_default_value()
         .with_description("The timestamp range for incremental reading.")
+    )
+
+    SCAN_TAG_NAME: ConfigOption[str] = (
+        ConfigOptions.key("scan.tag-name")
+        .string_type()
+        .no_default_value()
+        .with_description("Optional tag name used in case of 'from-snapshot' scan mode.")
     )
 
     SOURCE_SPLIT_TARGET_SIZE: ConfigOption[MemorySize] = (
@@ -239,6 +288,34 @@ class CoreOptions:
         .with_description("The prefix for commit user.")
     )
 
+    COMMIT_MAX_RETRIES: ConfigOption[int] = (
+        ConfigOptions.key("commit.max-retries")
+        .int_type()
+        .default_value(10)
+        .with_description("Maximum number of retries for commit operations.")
+    )
+
+    COMMIT_TIMEOUT: ConfigOption[timedelta] = (
+        ConfigOptions.key("commit.timeout")
+        .duration_type()
+        .no_default_value()
+        .with_description("Timeout for commit operations (e.g., '10s', '5m'). If not set, effectively unlimited.")
+    )
+
+    COMMIT_MIN_RETRY_WAIT: ConfigOption[timedelta] = (
+        ConfigOptions.key("commit.min-retry-wait")
+        .duration_type()
+        .default_value(timedelta(milliseconds=10))
+        .with_description("Minimum wait time between commit retries (e.g., '10ms', '100ms').")
+    )
+
+    COMMIT_MAX_RETRY_WAIT: ConfigOption[timedelta] = (
+        ConfigOptions.key("commit.max-retry-wait")
+        .duration_type()
+        .default_value(timedelta(seconds=10))
+        .with_description("Maximum wait time between commit retries (e.g., '1s', '10s').")
+    )
+
     ROW_TRACKING_ENABLED: ConfigOption[bool] = (
         ConfigOptions.key("row-tracking.enabled")
         .boolean_type()
@@ -274,6 +351,31 @@ class CoreOptions:
         .with_description("Specific filesystem for external paths when using specific-fs strategy.")
     )
 
+    # Global Index options
+    GLOBAL_INDEX_ENABLED: ConfigOption[bool] = (
+        ConfigOptions.key("global-index.enabled")
+        .boolean_type()
+        .default_value(True)
+        .with_description("Whether to enable global index for scan.")
+    )
+
+    GLOBAL_INDEX_THREAD_NUM: ConfigOption[int] = (
+        ConfigOptions.key("global-index.thread-num")
+        .int_type()
+        .no_default_value()
+        .with_description(
+            "The maximum number of concurrent scanner for global index. "
+            "By default is the number of processors available."
+        )
+    )
+
+    READ_BATCH_SIZE: ConfigOption[int] = (
+        ConfigOptions.key("read.batch-size")
+        .int_type()
+        .default_value(1024)
+        .with_description("Read batch size for any file format if it supports.")
+    )
+
     def __init__(self, options: Options):
         self.options = options
 
@@ -306,6 +408,12 @@ class CoreOptions:
     def bucket_key(self, default=None):
         return self.options.get(CoreOptions.BUCKET_KEY, default)
 
+    def dynamic_bucket_target_row_num(self, default=None):
+        return self.options.get(CoreOptions.DYNAMIC_BUCKET_TARGET_ROW_NUM, default)
+
+    def dynamic_bucket_max_buckets(self, default=None):
+        return self.options.get(CoreOptions.DYNAMIC_BUCKET_MAX_BUCKETS, default)
+
     def scan_manifest_parallelism(self, default=None):
         return self.options.get(CoreOptions.SCAN_MANIFEST_PARALLELISM, default)
 
@@ -314,6 +422,9 @@ class CoreOptions:
 
     def file_compression(self, default=None):
         return self.options.get(CoreOptions.FILE_COMPRESSION, default)
+
+    def file_compression_zstd_level(self, default=None):
+        return self.options.get(CoreOptions.FILE_COMPRESSION_ZSTD_LEVEL, default)
 
     def file_compression_per_level(self, default=None):
         return self.options.get(CoreOptions.FILE_COMPRESSION_PER_LEVEL, default)
@@ -329,6 +440,16 @@ class CoreOptions:
 
     def blob_as_descriptor(self, default=None):
         return self.options.get(CoreOptions.BLOB_AS_DESCRIPTOR, default)
+
+    def blob_descriptor_fields(self, default=None):
+        value = self.options.get(CoreOptions.BLOB_DESCRIPTOR_FIELD, default)
+        if value is None:
+            return set()
+        if isinstance(value, str):
+            return {field.strip() for field in value.split(",") if field.strip()}
+        if isinstance(value, (list, set, tuple)):
+            return {str(field).strip() for field in value if str(field).strip()}
+        return set()
 
     def target_file_size(self, has_primary_key, default=None):
         return self.options.get(CoreOptions.TARGET_FILE_SIZE,
@@ -357,6 +478,9 @@ class CoreOptions:
 
     def incremental_between_timestamp(self, default=None):
         return self.options.get(CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP, default)
+
+    def scan_tag_name(self, default=None):
+        return self.options.get(CoreOptions.SCAN_TAG_NAME, default)
 
     def source_split_target_size(self, default=None):
         return self.options.get(CoreOptions.SOURCE_SPLIT_TARGET_SIZE, default).get_bytes()
@@ -390,3 +514,29 @@ class CoreOptions:
 
     def data_file_external_paths_specific_fs(self, default=None):
         return self.options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS_SPECIFIC_FS, default)
+
+    def commit_max_retries(self) -> int:
+        return self.options.get(CoreOptions.COMMIT_MAX_RETRIES)
+
+    def commit_timeout(self) -> int:
+        timeout = self.options.get(CoreOptions.COMMIT_TIMEOUT)
+        if timeout is None:
+            return sys.maxsize
+        return int(timeout.total_seconds() * 1000)
+
+    def commit_min_retry_wait(self) -> int:
+        wait = self.options.get(CoreOptions.COMMIT_MIN_RETRY_WAIT)
+        return int(wait.total_seconds() * 1000)
+
+    def commit_max_retry_wait(self) -> int:
+        wait = self.options.get(CoreOptions.COMMIT_MAX_RETRY_WAIT)
+        return int(wait.total_seconds() * 1000)
+
+    def global_index_enabled(self, default=None):
+        return self.options.get(CoreOptions.GLOBAL_INDEX_ENABLED, default)
+
+    def global_index_thread_num(self) -> Optional[int]:
+        return self.options.get(CoreOptions.GLOBAL_INDEX_THREAD_NUM)
+
+    def read_batch_size(self, default=None) -> int:
+        return self.options.get(CoreOptions.READ_BATCH_SIZE, default or 1024)

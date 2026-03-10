@@ -33,10 +33,12 @@ public class OffsetGlobalIndexReader implements GlobalIndexReader {
 
     private final GlobalIndexReader wrapped;
     private final long offset;
+    private final long to;
 
-    public OffsetGlobalIndexReader(GlobalIndexReader wrapped, long offset) {
+    public OffsetGlobalIndexReader(GlobalIndexReader wrapped, long offset, long to) {
         this.wrapped = wrapped;
         this.offset = offset;
+        this.to = to;
     }
 
     @Override
@@ -110,8 +112,14 @@ public class OffsetGlobalIndexReader implements GlobalIndexReader {
     }
 
     @Override
+    public Optional<GlobalIndexResult> visitBetween(FieldRef fieldRef, Object from, Object to) {
+        return applyOffset(wrapped.visitBetween(fieldRef, from, to));
+    }
+
+    @Override
     public Optional<GlobalIndexResult> visitVectorSearch(VectorSearch vectorSearch) {
-        return applyOffset(wrapped.visitVectorSearch(vectorSearch));
+        return applyOffset(
+                wrapped.visitVectorSearch(vectorSearch.offsetRange(this.offset, this.to)));
     }
 
     private Optional<GlobalIndexResult> applyOffset(Optional<GlobalIndexResult> result) {

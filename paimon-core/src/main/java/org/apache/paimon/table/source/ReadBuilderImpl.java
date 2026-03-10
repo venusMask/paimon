@@ -19,8 +19,6 @@
 package org.apache.paimon.table.source;
 
 import org.apache.paimon.CoreOptions;
-import org.apache.paimon.data.variant.VariantAccessInfo;
-import org.apache.paimon.data.variant.VariantAccessInfoUtils;
 import org.apache.paimon.partition.PartitionPredicate;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.predicate.PredicateBuilder;
@@ -30,6 +28,7 @@ import org.apache.paimon.table.InnerTable;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.Filter;
 import org.apache.paimon.utils.Range;
+import org.apache.paimon.utils.RowRangeIndex;
 
 import javax.annotation.Nullable;
 
@@ -64,8 +63,7 @@ public class ReadBuilderImpl implements ReadBuilder {
     private Filter<Integer> bucketFilter;
 
     private @Nullable RowType readType;
-    private @Nullable VariantAccessInfo[] variantAccessInfo;
-    private @Nullable List<Range> rowRanges;
+    private @Nullable RowRangeIndex rowRangeIndex;
     private @Nullable VectorSearch vectorSearch;
 
     private boolean dropStats = false;
@@ -83,13 +81,7 @@ public class ReadBuilderImpl implements ReadBuilder {
 
     @Override
     public RowType readType() {
-        RowType finalReadType = readType != null ? readType : table.rowType();
-        // When variantAccessInfo is not null, replace the variant with the actual readType.
-        if (variantAccessInfo != null) {
-            finalReadType =
-                    VariantAccessInfoUtils.buildReadRowType(finalReadType, variantAccessInfo);
-        }
-        return finalReadType;
+        return readType != null ? readType : table.rowType();
     }
 
     @Override
@@ -127,12 +119,6 @@ public class ReadBuilderImpl implements ReadBuilder {
     }
 
     @Override
-    public ReadBuilder withVariantAccess(VariantAccessInfo[] variantAccessInfo) {
-        this.variantAccessInfo = variantAccessInfo;
-        return this;
-    }
-
-    @Override
     public ReadBuilder withProjection(int[] projection) {
         if (projection == null) {
             return this;
@@ -161,7 +147,17 @@ public class ReadBuilderImpl implements ReadBuilder {
 
     @Override
     public ReadBuilder withRowRanges(List<Range> indices) {
-        this.rowRanges = indices;
+        if (indices == null) {
+            this.rowRangeIndex = null;
+            return this;
+        }
+        this.rowRangeIndex = RowRangeIndex.create(indices);
+        return this;
+    }
+
+    @Override
+    public ReadBuilder withRowRangeIndex(RowRangeIndex rowRangeIndex) {
+        this.rowRangeIndex = rowRangeIndex;
         return this;
     }
 
@@ -213,7 +209,7 @@ public class ReadBuilderImpl implements ReadBuilder {
         scan.withFilter(filter)
                 .withReadType(readType)
                 .withPartitionFilter(partitionFilter)
-                .withRowRanges(rowRanges)
+                .withRowRangeIndex(rowRangeIndex)
                 .withVectorSearch(vectorSearch);
 
         checkState(
@@ -252,9 +248,6 @@ public class ReadBuilderImpl implements ReadBuilder {
         }
         if (limit != null) {
             read.withLimit(limit);
-        }
-        if (variantAccessInfo != null) {
-            read.withVariantAccess(variantAccessInfo);
         }
         return read;
     }

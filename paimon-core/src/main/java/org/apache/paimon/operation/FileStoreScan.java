@@ -34,6 +34,7 @@ import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.BiFilter;
 import org.apache.paimon.utils.Filter;
 import org.apache.paimon.utils.Range;
+import org.apache.paimon.utils.RowRangeIndex;
 
 import javax.annotation.Nullable;
 
@@ -91,6 +92,8 @@ public interface FileStoreScan {
 
     FileStoreScan withRowRanges(List<Range> rowRanges);
 
+    FileStoreScan withRowRangeIndex(RowRangeIndex rowRangeIndex);
+
     FileStoreScan withReadType(RowType readType);
 
     FileStoreScan withLimit(long limit);
@@ -116,6 +119,8 @@ public interface FileStoreScan {
     List<BucketEntry> readBucketEntries();
 
     Iterator<ManifestEntry> readFileIterator();
+
+    Iterator<ManifestEntry> readFileIterator(List<ManifestFileMeta> manifestFileMetas);
 
     default List<BinaryRow> listPartitions() {
         return readPartitionEntries().stream()

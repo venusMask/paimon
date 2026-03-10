@@ -31,9 +31,9 @@ import org.apache.paimon.options.Options;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.BigIntType;
-import org.apache.paimon.types.BlobType;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.IntType;
 import org.apache.paimon.types.LocalZonedTimestampType;
 import org.apache.paimon.types.MapType;
@@ -43,9 +43,7 @@ import org.apache.paimon.types.TimestampType;
 import org.apache.paimon.utils.Preconditions;
 import org.apache.paimon.utils.StringUtils;
 
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -76,9 +74,10 @@ import static org.apache.paimon.CoreOptions.SCAN_WATERMARK;
 import static org.apache.paimon.CoreOptions.SNAPSHOT_NUM_RETAINED_MAX;
 import static org.apache.paimon.CoreOptions.SNAPSHOT_NUM_RETAINED_MIN;
 import static org.apache.paimon.CoreOptions.STREAMING_READ_OVERWRITE;
-import static org.apache.paimon.mergetree.compact.PartialUpdateMergeFunction.SEQUENCE_GROUP;
+import static org.apache.paimon.table.PrimaryKeyTableUtils.createMergeFunctionFactory;
 import static org.apache.paimon.table.SpecialFields.KEY_FIELD_PREFIX;
 import static org.apache.paimon.table.SpecialFields.SYSTEM_FIELD_NAMES;
+import static org.apache.paimon.types.BlobType.fieldsNotInBlobFile;
 import static org.apache.paimon.types.DataTypeRoot.ARRAY;
 import static org.apache.paimon.types.DataTypeRoot.MAP;
 import static org.apache.paimon.types.DataTypeRoot.MULTISET;
@@ -94,8 +93,6 @@ public class SchemaValidation {
 
     /**
      * Validate the {@link TableSchema} and {@link CoreOptions}.
-     *
-     * <p>TODO validate all items in schema and all keys in options.
      *
      * @param schema the schema to be validated
      */
@@ -121,7 +118,7 @@ public class SchemaValidation {
 
         validateSequenceField(schema, options);
 
-        validateSequenceGroup(schema, options);
+        validateMergeFunction(schema);
 
         ChangelogProducer changelogProducer = options.changelogProducer();
         if (schema.primaryKeys().isEmpty() && changelogProducer != ChangelogProducer.NONE) {
@@ -161,7 +158,11 @@ public class SchemaValidation {
 
         FileFormat fileFormat =
                 FileFormat.fromIdentifier(options.formatType(), new Options(schema.options()));
-        fileFormat.validateDataFields(BlobType.splitBlob(new RowType(schema.fields())).getLeft());
+        RowType tableRowType = new RowType(schema.fields());
+        Set<String> blobDescriptorFields = validateBlobDescriptorFields(tableRowType, options);
+        validateBlobExternalStorageFields(tableRowType, options, blobDescriptorFields);
+        fileFormat.validateDataFields(
+                new RowType(fieldsNotInBlobFile(tableRowType, blobDescriptorFields)));
 
         // Check column names in schema
         schema.fieldNames()
@@ -245,6 +246,8 @@ public class SchemaValidation {
         validateIncrementalClustering(schema, options);
 
         validateChainTable(schema, options);
+
+        validateChangelogReadSequenceNumber(schema, options);
     }
 
     public static void validateFallbackBranch(SchemaManager schemaManager, TableSchema schema) {
@@ -448,61 +451,12 @@ public class SchemaValidation {
                         });
     }
 
-    private static void validateSequenceGroup(TableSchema schema, CoreOptions options) {
-        Map<String, Set<String>> fields2Group = new HashMap<>();
-        for (Map.Entry<String, String> entry : options.toMap().entrySet()) {
-            String k = entry.getKey();
-            String v = entry.getValue();
-            List<String> fieldNames = schema.fieldNames();
-            if (k.startsWith(FIELDS_PREFIX) && k.endsWith(SEQUENCE_GROUP)) {
-                String[] sequenceFieldNames =
-                        k.substring(
-                                        FIELDS_PREFIX.length() + 1,
-                                        k.length() - SEQUENCE_GROUP.length() - 1)
-                                .split(FIELDS_SEPARATOR);
-
-                for (String field : v.split(FIELDS_SEPARATOR)) {
-                    if (!fieldNames.contains(field)) {
-                        throw new IllegalArgumentException(
-                                String.format("Field %s can not be found in table schema.", field));
-                    }
-
-                    List<String> sequenceFieldsList = new ArrayList<>();
-                    for (String sequenceFieldName : sequenceFieldNames) {
-                        if (!fieldNames.contains(sequenceFieldName)) {
-                            throw new IllegalArgumentException(
-                                    String.format(
-                                            "The sequence field group: %s can not be found in table schema.",
-                                            sequenceFieldName));
-                        }
-                        sequenceFieldsList.add(sequenceFieldName);
-                    }
-
-                    if (fields2Group.containsKey(field)) {
-                        List<List<String>> sequenceGroups = new ArrayList<>();
-                        sequenceGroups.add(new ArrayList<>(fields2Group.get(field)));
-                        sequenceGroups.add(sequenceFieldsList);
-
-                        throw new IllegalArgumentException(
-                                String.format(
-                                        "Field %s is defined repeatedly by multiple groups: %s.",
-                                        field, sequenceGroups));
-                    }
-
-                    Set<String> group = fields2Group.computeIfAbsent(field, p -> new HashSet<>());
-                    group.addAll(sequenceFieldsList);
-                }
-            }
+    private static void validateMergeFunction(TableSchema schema) {
+        if (schema.primaryKeys().isEmpty()) {
+            return;
         }
-        Set<String> illegalGroup =
-                fields2Group.values().stream()
-                        .flatMap(Collection::stream)
-                        .filter(g -> options.fieldAggFunc(g) != null)
-                        .collect(Collectors.toSet());
-        if (!illegalGroup.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "Should not defined aggregation function on sequence group: " + illegalGroup);
-        }
+
+        createMergeFunctionFactory(schema);
     }
 
     private static void validateForDeletionVectors(CoreOptions options) {
@@ -651,37 +605,103 @@ public class SchemaValidation {
             checkArgument(
                     !options.deletionVectorsEnabled(),
                     "Data evolution config must disabled with deletion-vectors.enabled");
+            checkArgument(
+                    !options.clusteringIncrementalEnabled(),
+                    "Data evolution config must disabled with clustering.incremental");
         }
 
+        List<DataField> fields = schema.fields();
         List<String> blobNames =
-                BlobType.splitBlob(schema.logicalRowType()).getRight().getFieldNames();
+                fields.stream()
+                        .filter(field -> field.type().is(DataTypeRoot.BLOB))
+                        .map(DataField::name)
+                        .collect(Collectors.toList());
         if (!blobNames.isEmpty()) {
             checkArgument(
                     options.dataEvolutionEnabled(),
                     "Data evolution config must enabled for table with BLOB type column.");
             checkArgument(
-                    blobNames.size() == 1,
-                    "Table with BLOB type column only support one BLOB column.");
-            checkArgument(
-                    schema.fields().size() > 1,
+                    fields.size() > blobNames.size(),
                     "Table with BLOB type column must have other normal columns.");
             checkArgument(
-                    !schema.partitionKeys().contains(blobNames.get(0)),
+                    blobNames.stream().noneMatch(schema.partitionKeys()::contains),
                     "The BLOB type column can not be part of partition keys.");
+        }
+    }
+
+    private static Set<String> validateBlobDescriptorFields(RowType rowType, CoreOptions options) {
+        Set<String> blobFieldNames =
+                rowType.getFields().stream()
+                        .filter(field -> field.type().getTypeRoot() == DataTypeRoot.BLOB)
+                        .map(DataField::name)
+                        .collect(Collectors.toCollection(HashSet::new));
+        Set<String> configured = options.blobDescriptorField();
+        for (String field : configured) {
+            checkArgument(
+                    blobFieldNames.contains(field),
+                    "Field '%s' in '%s' must be a BLOB field in table schema.",
+                    field,
+                    CoreOptions.BLOB_DESCRIPTOR_FIELD.key());
+        }
+        return configured;
+    }
+
+    private static void validateBlobExternalStorageFields(
+            RowType rowType, CoreOptions options, Set<String> blobDescriptorFields) {
+        Set<String> blobFieldNames =
+                rowType.getFields().stream()
+                        .filter(field -> field.type().getTypeRoot() == DataTypeRoot.BLOB)
+                        .map(DataField::name)
+                        .collect(Collectors.toCollection(HashSet::new));
+        Set<String> configured = options.blobExternalStorageField();
+        for (String field : configured) {
+            checkArgument(
+                    blobFieldNames.contains(field),
+                    "Field '%s' in '%s' must be a BLOB field in table schema.",
+                    field,
+                    CoreOptions.BLOB_EXTERNAL_STORAGE_FIELD.key());
+            checkArgument(
+                    blobDescriptorFields.contains(field),
+                    "Field '%s' in '%s' must also be in '%s'.",
+                    field,
+                    CoreOptions.BLOB_EXTERNAL_STORAGE_FIELD.key(),
+                    CoreOptions.BLOB_DESCRIPTOR_FIELD.key());
+        }
+        if (!configured.isEmpty()) {
+            String externalStoragePath = options.blobExternalStoragePath();
+            checkArgument(
+                    externalStoragePath != null && !externalStoragePath.isEmpty(),
+                    "'%s' must be set when '%s' is configured.",
+                    CoreOptions.BLOB_EXTERNAL_STORAGE_PATH.key(),
+                    CoreOptions.BLOB_EXTERNAL_STORAGE_FIELD.key());
         }
     }
 
     private static void validateIncrementalClustering(TableSchema schema, CoreOptions options) {
         if (options.clusteringIncrementalEnabled()) {
             checkArgument(
-                    options.bucket() == -1,
-                    "Cannot define %s for incremental clustering  table, it only support bucket = -1",
-                    CoreOptions.BUCKET.key());
-            checkArgument(
                     schema.primaryKeys().isEmpty(),
                     "Cannot define %s for incremental clustering table.",
                     PRIMARY_KEY.key());
+            if (options.bucket() != -1) {
+                checkArgument(
+                        !options.bucketAppendOrdered(),
+                        "%s must be false for incremental clustering table.",
+                        CoreOptions.BUCKET_APPEND_ORDERED.key());
+                checkArgument(
+                        !options.deletionVectorsEnabled(),
+                        "Cannot enable deletion-vectors for incremental clustering table which bucket is not -1.");
+            }
         }
+    }
+
+    private static int requireField(String fieldName, List<String> fieldNames) {
+        int field = fieldNames.indexOf(fieldName);
+        if (field == -1) {
+            throw new IllegalArgumentException(
+                    String.format("Field %s can not be found in table schema.", fieldName));
+        }
+        return field;
     }
 
     public static void validateChainTable(TableSchema schema, CoreOptions options) {
@@ -699,18 +719,29 @@ public class SchemaValidation {
             Preconditions.checkArgument(
                     options.sequenceField() != null, "Sequence field is required for chain table.");
             Preconditions.checkArgument(
-                    options.mergeEngine() == MergeEngine.DEDUPLICATE,
-                    "Merge engine must be deduplicate for chain table.");
-            Preconditions.checkArgument(
                     changelogProducer == ChangelogProducer.NONE
                             || changelogProducer == ChangelogProducer.INPUT,
                     "Changelog producer must be none or input for chain table.");
+            Preconditions.checkArgument(
+                    !options.deletionVectorsEnabled(),
+                    "Chain table do not support enable deletion vector");
             Preconditions.checkArgument(
                     options.partitionTimestampPattern() != null,
                     "Partition timestamp pattern is required for chain table.");
             Preconditions.checkArgument(
                     options.partitionTimestampFormatter() != null,
                     "Partition timestamp formatter is required for chain table.");
+        }
+    }
+
+    private static void validateChangelogReadSequenceNumber(
+            TableSchema schema, CoreOptions options) {
+        if (options.tableReadSequenceNumberEnabled()) {
+            checkArgument(
+                    !schema.primaryKeys().isEmpty(),
+                    "Cannot enable '%s' for non-primary-key table. "
+                            + "Sequence number is only available for primary key tables.",
+                    CoreOptions.TABLE_READ_SEQUENCE_NUMBER_ENABLED.key());
         }
     }
 }

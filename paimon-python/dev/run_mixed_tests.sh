@@ -60,18 +60,18 @@ cleanup_warehouse() {
 
 # Function to run Java test
 run_java_write_test() {
-    echo -e "${YELLOW}=== Step 1: Running Java Write Tests (Parquet + Lance) ===${NC}"
+    echo -e "${YELLOW}=== Step 1: Running Java Write Tests (Parquet/Orc/Avro + Lance) ===${NC}"
 
     cd "$PROJECT_ROOT"
 
-    # Run the Java test method for parquet format
-    echo "Running Maven test for JavaPyE2ETest.testJavaWriteReadPkTable (Parquet)..."
+    # Run the Java test method for Parquet/Orc/Avro format
+    echo "Running Maven test for JavaPyE2ETest.testJavaWriteReadPkTable (Parquet/Orc/Avro)..."
     echo "Note: Maven may download dependencies on first run, this may take a while..."
     local parquet_result=0
     if mvn test -Dtest=org.apache.paimon.JavaPyE2ETest#testJavaWriteReadPkTable -pl paimon-core -Drun.e2e.tests=true; then
-        echo -e "${GREEN}✓ Java write parquet test completed successfully${NC}"
+        echo -e "${GREEN}✓ Java write Parquet/Orc/Avro test completed successfully${NC}"
     else
-        echo -e "${RED}✗ Java write parquet test failed${NC}"
+        echo -e "${RED}✗ Java write Parquet/Orc/Avro test failed${NC}"
         parquet_result=1
     fi
 
@@ -102,7 +102,7 @@ run_python_read_test() {
 
     cd "$PAIMON_PYTHON_DIR"
 
-    # Run the parameterized Python test method (runs for both parquet and lance)
+    # Run the parameterized Python test method (runs for both Parquet/Orc/Avro and Lance)
     echo "Running Python test for JavaPyReadWriteTest.test_read_pk_table..."
     if python -m pytest java_py_read_write_test.py::JavaPyReadWriteTest -k "test_read_pk_table" -v; then
         echo -e "${GREEN}✓ Python test completed successfully${NC}"
@@ -117,12 +117,12 @@ run_python_read_test() {
 
 # Function to run Python Write test for Python-Write-Java-Read scenario
 run_python_write_test() {
-    echo -e "${YELLOW}=== Step 3: Running Python Write Test (JavaPyReadWriteTest.test_py_write_read_pk_table) ===${NC}"
+    echo -e "${YELLOW}=== Step 3: Running Python Write Test (test_py_write_read_pk_table) ===${NC}"
 
     cd "$PAIMON_PYTHON_DIR"
 
-    # Run the parameterized Python test method for writing data (runs for both parquet and lance)
-    echo "Running Python test for JavaPyReadWriteTest.test_py_write_read_pk_table (Python Write)..."
+    # Run the parameterized Python test method for writing data (pk table, includes bucket num assertion)
+    echo "Running Python test for JavaPyReadWriteTest (test_py_write_read_pk_table)..."
     if python -m pytest java_py_read_write_test.py::JavaPyReadWriteTest -k "test_py_write_read_pk_table" -v; then
         echo -e "${GREEN}✓ Python write test completed successfully${NC}"
         return 0
@@ -134,18 +134,21 @@ run_python_write_test() {
 
 # Function to run Java Read test for Python-Write-Java-Read scenario
 run_java_read_test() {
-    echo -e "${YELLOW}=== Step 4: Running Java Read Test (JavaPyE2ETest.testReadPkTable for parquet, JavaPyLanceE2ETest.testReadPkTableLance for lance) ===${NC}"
+    echo -e "${YELLOW}=== Step 4: Running Java Read Test (testReadPkTable, testReadPkTableLance) ===${NC}"
 
     cd "$PROJECT_ROOT"
 
-    # Run Java test for parquet format in paimon-core
-    echo "Running Maven test for JavaPyE2ETest.testReadPkTable (Java Read Parquet)..."
+    PYTHON_VERSION=$(python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown")
+    echo "Detected Python version: $PYTHON_VERSION"
+
+    # Run Java test for Parquet/Orc/Avro format in paimon-core
+    echo "Running Maven test for JavaPyE2ETest.testReadPkTable (Java Read Parquet/Orc/Avro)..."
     echo "Note: Maven may download dependencies on first run, this may take a while..."
     local parquet_result=0
-    if mvn test -Dtest=org.apache.paimon.JavaPyE2ETest#testReadPkTable -pl paimon-core -Drun.e2e.tests=true; then
-        echo -e "${GREEN}✓ Java read parquet test completed successfully${NC}"
+    if mvn test -Dtest=org.apache.paimon.JavaPyE2ETest#testReadPkTable -pl paimon-core -Drun.e2e.tests=true -Dpython.version="$PYTHON_VERSION"; then
+        echo -e "${GREEN}✓ Java read Parquet/Orc/Avro test completed successfully${NC}"
     else
-        echo -e "${RED}✗ Java read parquet test failed${NC}"
+        echo -e "${RED}✗ Java read Parquet/Orc/Avro test failed${NC}"
         parquet_result=1
     fi
 
@@ -155,7 +158,7 @@ run_java_read_test() {
     echo "Running Maven test for JavaPyLanceE2ETest.testReadPkTableLance (Java Read Lance)..."
     echo "Note: Maven may download dependencies on first run, this may take a while..."
     local lance_result=0
-    if mvn test -Dtest=org.apache.paimon.JavaPyLanceE2ETest#testReadPkTableLance -pl paimon-lance -Drun.e2e.tests=true; then
+    if mvn test -Dtest=org.apache.paimon.JavaPyLanceE2ETest#testReadPkTableLance -pl paimon-lance -Drun.e2e.tests=true -Dpython.version="$PYTHON_VERSION"; then
         echo -e "${GREEN}✓ Java read lance test completed successfully${NC}"
     else
         echo -e "${RED}✗ Java read lance test failed${NC}"
@@ -192,6 +195,32 @@ run_pk_dv_test() {
         return 1
     fi
 }
+
+# Function to run BTree index test (Java write, Python read)
+run_btree_index_test() {
+    echo -e "${YELLOW}=== Step 6: Running BTree Index Test (Java Write, Python Read) ===${NC}"
+
+    cd "$PROJECT_ROOT"
+
+    echo "Running Maven test for JavaPyE2ETest.testBtreeIndexWrite..."
+    if mvn test -Dtest=org.apache.paimon.JavaPyE2ETest#testBtreeIndexWrite -pl paimon-core -q -Drun.e2e.tests=true; then
+        echo -e "${GREEN}✓ Java test completed successfully${NC}"
+    else
+        echo -e "${RED}✗ Java test failed${NC}"
+        return 1
+    fi
+    cd "$PAIMON_PYTHON_DIR"
+    # Run the specific Python test method
+    echo "Running Python test for JavaPyReadWriteTest.test_read_btree_index_table..."
+    if python -m pytest java_py_read_write_test.py::JavaPyReadWriteTest::test_read_btree_index_table -v; then
+        echo -e "${GREEN}✓ Python test completed successfully${NC}"
+        return 0
+    else
+        echo -e "${RED}✗ Python test failed${NC}"
+        return 1
+    fi
+}
+
 # Main execution
 main() {
     local java_write_result=0
@@ -199,6 +228,7 @@ main() {
     local python_write_result=0
     local java_read_result=0
     local pk_dv_result=0
+    local btree_index_result=0
 
     echo -e "${YELLOW}Starting mixed language test execution...${NC}"
     echo ""
@@ -232,7 +262,7 @@ main() {
         echo ""
     fi
 
-    # Run Java read test (handles both parquet and lance)
+    # Run Java read test (handles both Parquet/Orc/Avro and Lance)
     if ! run_java_read_test; then
         java_read_result=1
     fi
@@ -241,13 +271,22 @@ main() {
     if ! run_pk_dv_test; then
         pk_dv_result=1
     fi
+
     echo ""
+
+    # Run BTree index test (Java write, Python read)
+    if ! run_btree_index_test; then
+        btree_index_result=1
+    fi
+
+    echo ""
+
     echo -e "${YELLOW}=== Test Results Summary ===${NC}"
 
     if [[ $java_write_result -eq 0 ]]; then
-        echo -e "${GREEN}✓ Java Write Test (Parquet + Lance): PASSED${NC}"
+        echo -e "${GREEN}✓ Java Write Test (Parquet/Orc/Avro + Lance): PASSED${NC}"
     else
-        echo -e "${RED}✗ Java Write Test (Parquet + Lance): FAILED${NC}"
+        echo -e "${RED}✗ Java Write Test (Parquet/Orc/Avro + Lance): FAILED${NC}"
     fi
 
     if [[ $python_read_result -eq 0 ]]; then
@@ -257,29 +296,35 @@ main() {
     fi
 
     if [[ $python_write_result -eq 0 ]]; then
-        echo -e "${GREEN}✓ Python Write Test (JavaPyReadWriteTest.test_py_write_read_pk_table): PASSED${NC}"
+        echo -e "${GREEN}✓ Python Write Test (test_py_write_read_pk_table): PASSED${NC}"
     else
-        echo -e "${RED}✗ Python Write Test (JavaPyReadWriteTest.test_py_write_read_pk_table): FAILED${NC}"
+        echo -e "${RED}✗ Python Write Test (test_py_write_read_pk_table): FAILED${NC}"
     fi
 
     if [[ $java_read_result -eq 0 ]]; then
-        echo -e "${GREEN}✓ Java Read Test (Parquet + Lance): PASSED${NC}"
+        echo -e "${GREEN}✓ Java Read Test (Parquet/Orc/Avro + Lance): PASSED${NC}"
     else
-        echo -e "${RED}✗ Java Read Test (Parquet + Lance): FAILED${NC}"
+        echo -e "${RED}✗ Java Read Test (Parquet/Orc/Avro + Lance): FAILED${NC}"
     fi
 
-     if [[ $pk_dv_result -eq 0 ]]; then
-          echo -e "${GREEN}✓ PK DV Test (JavaPyReadWriteTest.testPKDeletionVectorWriteRead): PASSED${NC}"
-      else
-          echo -e "${RED}✗ PK DV Test (JavaPyReadWriteTest.testPKDeletionVectorWriteRead): FAILED${NC}"
-      fi
+    if [[ $pk_dv_result -eq 0 ]]; then
+        echo -e "${GREEN}✓ PK DV Test (JavaPyReadWriteTest.testPKDeletionVectorWriteRead): PASSED${NC}"
+    else
+        echo -e "${RED}✗ PK DV Test (JavaPyReadWriteTest.testPKDeletionVectorWriteRead): FAILED${NC}"
+    fi
+
+    if [[ $btree_index_result -eq 0 ]]; then
+        echo -e "${GREEN}✓ BTree Index Test (Java Write, Python Read): PASSED${NC}"
+    else
+        echo -e "${RED}✗ BTree Index Test (Java Write, Python Read): FAILED${NC}"
+    fi
 
     echo ""
 
     # Clean up warehouse directory after all tests
     cleanup_warehouse
 
-    if [[ $java_write_result -eq 0 && $python_read_result -eq 0 && $python_write_result -eq 0 && $java_read_result -eq 0 && $pk_dv_result -eq 0 ]]; then
+    if [[ $java_write_result -eq 0 && $python_read_result -eq 0 && $python_write_result -eq 0 && $java_read_result -eq 0 && $pk_dv_result -eq 0 && $btree_index_result -eq 0 ]]; then
         echo -e "${GREEN}🎉 All tests passed! Java-Python interoperability verified.${NC}"
         return 0
     else

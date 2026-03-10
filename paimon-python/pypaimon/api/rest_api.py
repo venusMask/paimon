@@ -18,9 +18,10 @@
 import logging
 from typing import Callable, Dict, List, Optional, Union
 
-from pypaimon.api.api_request import (AlterDatabaseRequest, CommitTableRequest,
+from pypaimon.api.api_request import (AlterDatabaseRequest, AlterTableRequest, CommitTableRequest,
                                       CreateDatabaseRequest,
-                                      CreateTableRequest, RenameTableRequest)
+                                      CreateTableRequest, RenameTableRequest,
+                                      RollbackTableRequest)
 from pypaimon.api.api_response import (CommitTableResponse, ConfigResponse,
                                        GetDatabaseResponse, GetTableResponse,
                                        GetTableTokenResponse,
@@ -46,6 +47,7 @@ class RESTApi:
     PAGE_TOKEN = "pageToken"
     DATABASE_NAME_PATTERN = "databaseNamePattern"
     TABLE_NAME_PATTERN = "tableNamePattern"
+    TABLE_TYPE = "tableType"
     TOKEN_EXPIRATION_SAFE_TIME_MILLIS = 3_600_000
 
     def __init__(self, options: Union[Options, Dict[str, str]], config_required: bool = True):
@@ -88,6 +90,7 @@ class RESTApi:
         self.resource_paths = ResourcePaths.for_catalog_properties(options)
 
     def __build_paged_query_params(
+            self,
             max_results: Optional[int],
             page_token: Optional[str],
             name_patterns: Dict[str, str],
@@ -99,7 +102,7 @@ class RESTApi:
         if page_token is not None and page_token.strip():
             query_params[RESTApi.PAGE_TOKEN] = page_token
 
-        for key, value in name_patterns:
+        for key, value in name_patterns.items():
             if key and value and key.strip() and value.strip():
                 query_params[key] = value
 
@@ -227,6 +230,7 @@ class RESTApi:
             max_results: Optional[int] = None,
             page_token: Optional[str] = None,
             table_name_pattern: Optional[str] = None,
+            table_type: Optional[str] = None,
     ) -> PagedList[str]:
         if not database_name or not database_name.strip():
             raise ValueError("Database name cannot be empty")
@@ -234,7 +238,12 @@ class RESTApi:
         response = self.client.get_with_params(
             self.resource_paths.tables(database_name),
             self.__build_paged_query_params(
-                max_results, page_token, {self.TABLE_NAME_PATTERN: table_name_pattern}
+                max_results,
+                page_token,
+                {
+                    self.TABLE_NAME_PATTERN: table_name_pattern,
+                    self.TABLE_TYPE: table_type,
+                },
             ),
             ListTablesResponse,
             self.rest_auth_function,
@@ -289,6 +298,17 @@ class RESTApi:
             request,
             self.rest_auth_function)
 
+    def alter_table(self, identifier: Identifier, changes: List):
+        database_name, table_name = self.__validate_identifier(identifier)
+        if not changes:
+            raise ValueError("Changes cannot be empty")
+
+        request = AlterTableRequest(changes)
+        return self.client.post(
+            self.resource_paths.table(database_name, table_name),
+            request,
+            self.rest_auth_function)
+
     def load_table_token(self, identifier: Identifier) -> GetTableTokenResponse:
         database_name, table_name = self.__validate_identifier(identifier)
 
@@ -338,6 +358,27 @@ class RESTApi:
             self.rest_auth_function
         )
         return response.is_success()
+
+    def rollback_to(self, identifier, instant, from_snapshot=None):
+        """Rollback table to the given instant.
+
+        Args:
+            identifier: The table identifier.
+            instant: The Instant (SnapshotInstant or TagInstant) to rollback to.
+            from_snapshot: Optional snapshot ID. Success only occurs when the
+                latest snapshot is this snapshot.
+
+        Raises:
+            NoSuchResourceException: If the table, snapshot or tag does not exist.
+            ForbiddenException: If no permission to access this table.
+        """
+        database_name, table_name = self.__validate_identifier(identifier)
+        request = RollbackTableRequest(instant=instant, from_snapshot=from_snapshot)
+        self.client.post(
+            self.resource_paths.rollback_table(database_name, table_name),
+            request,
+            self.rest_auth_function
+        )
 
     @staticmethod
     def __validate_identifier(identifier: Identifier):

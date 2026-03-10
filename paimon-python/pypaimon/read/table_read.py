@@ -15,11 +15,12 @@
 #  See the License for the specific language governing permissions and
 # limitations under the License.
 ################################################################################
-from typing import Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import pandas
 import pyarrow
 
+from pypaimon.common.options.core_options import CoreOptions
 from pypaimon.common.predicate import Predicate
 from pypaimon.read.reader.iface.record_batch_reader import RecordBatchReader
 from pypaimon.read.split import Split
@@ -66,7 +67,7 @@ class TableRead:
         num_rows = batch.num_rows
 
         for field in target_schema:
-            if field.name in batch.column_names:
+            if field.name in batch.schema.names:
                 col = batch.column(field.name)
             else:
                 col = pyarrow.nulls(num_rows, type=field.type)
@@ -87,7 +88,56 @@ class TableRead:
         if not table_list:
             return pyarrow.Table.from_arrays([pyarrow.array([], type=field.type) for field in schema], schema=schema)
         else:
-            return pyarrow.Table.from_batches(table_list)
+            table = pyarrow.Table.from_batches(table_list)
+            return self._convert_descriptor_stored_fields_for_read(table)
+
+    def _convert_descriptor_stored_fields_for_read(self, table: pyarrow.Table) -> pyarrow.Table:
+        if CoreOptions.blob_as_descriptor(self.table.options):
+            return table
+
+        descriptor_fields = CoreOptions.blob_descriptor_fields(self.table.options)
+        if not descriptor_fields:
+            return table
+
+        from pypaimon.table.row.blob import Blob, BlobDescriptor
+
+        result = table
+        for field_name in descriptor_fields:
+            if field_name not in result.column_names:
+                continue
+            values = result.column(field_name).to_pylist()
+            converted_values = []
+            for value in values:
+                if value is None:
+                    converted_values.append(None)
+                    continue
+                if hasattr(value, 'as_py'):
+                    value = value.as_py()
+                if isinstance(value, str):
+                    value = value.encode('utf-8')
+                if isinstance(value, bytearray):
+                    value = bytes(value)
+                if not isinstance(value, bytes):
+                    converted_values.append(value)
+                    continue
+
+                try:
+                    descriptor = BlobDescriptor.deserialize(value)
+                    if descriptor.serialize() != value:
+                        converted_values.append(value)
+                        continue
+                    uri_reader = self.table.file_io.uri_reader_factory.create(descriptor.uri)
+                    converted_values.append(Blob.from_descriptor(uri_reader, descriptor).to_data())
+                except Exception:
+                    converted_values.append(value)
+
+            column_idx = result.column_names.index(field_name)
+            result = result.set_column(
+                column_idx,
+                pyarrow.field(field_name, pyarrow.large_binary(), nullable=True),
+                pyarrow.array(converted_values, type=pyarrow.large_binary()),
+            )
+        return result
 
     def _arrow_batch_generator(self, splits: List[Split], schema: pyarrow.Schema) -> Iterator[pyarrow.RecordBatch]:
         chunk_size = 65536
@@ -128,8 +178,30 @@ class TableRead:
         con.register(table_name, self.to_arrow(splits))
         return con
 
-    def to_ray(self, splits: List[Split], parallelism: int = 1) -> "ray.data.dataset.Dataset":
-        """Convert Paimon table data to Ray Dataset."""
+    def to_ray(
+        self,
+        splits: List[Split],
+        *,
+        ray_remote_args: Optional[Dict[str, Any]] = None,
+        concurrency: Optional[int] = None,
+        override_num_blocks: Optional[int] = None,
+        **read_args,
+    ) -> "ray.data.dataset.Dataset":
+        """Convert Paimon table data to Ray Dataset.
+        Args:
+            splits: List of splits to read from the Paimon table.
+            ray_remote_args: Optional kwargs passed to :func:`ray.remote` in read tasks.
+                For example, ``{"num_cpus": 2, "max_retries": 3}``.
+            concurrency: Optional max number of Ray tasks to run concurrently.
+                By default, dynamically decided based on available resources.
+            override_num_blocks: Optional override for the number of output blocks.
+                You needn't manually set this in most cases.
+            **read_args: Additional kwargs passed to the datasource.
+                For example, ``per_task_row_limit`` (Ray 2.52.0+).
+        
+        See `Ray Data API <https://docs.ray.io/en/latest/data/api/doc/ray.data.read_datasource.html>`_
+        for details.
+        """
         import ray
 
         if not splits:
@@ -140,13 +212,34 @@ class TableRead:
             )
             return ray.data.from_arrow(empty_table)
 
-        # Validate parallelism parameter
-        if parallelism < 1:
-            raise ValueError(f"parallelism must be at least 1, got {parallelism}")
+        if override_num_blocks is not None and override_num_blocks < 1:
+            raise ValueError(f"override_num_blocks must be at least 1, got {override_num_blocks}")
 
-        from pypaimon.read.ray_datasource import PaimonDatasource
-        datasource = PaimonDatasource(self, splits)
-        return ray.data.read_datasource(datasource, parallelism=parallelism)
+        from pypaimon.read.datasource.ray_datasource import RayDatasource
+        datasource = RayDatasource(self, splits)
+        return ray.data.read_datasource(
+            datasource,
+            ray_remote_args=ray_remote_args,
+            concurrency=concurrency,
+            override_num_blocks=override_num_blocks,
+            **read_args
+        )
+
+    def to_torch(
+        self,
+        splits: List[Split],
+        streaming: bool = False,
+        prefetch_concurrency: int = 1,
+    ) -> "torch.utils.data.Dataset":
+        """Wrap Paimon table data to PyTorch Dataset."""
+        if streaming:
+            from pypaimon.read.datasource.torch_dataset import TorchIterDataset
+            dataset = TorchIterDataset(self, splits, prefetch_concurrency)
+            return dataset
+        else:
+            from pypaimon.read.datasource.torch_dataset import TorchDataset
+            dataset = TorchDataset(self, splits)
+            return dataset
 
     def _create_split_read(self, split: Split) -> SplitRead:
         if self.table.is_primary_key_table and not split.raw_convertible:

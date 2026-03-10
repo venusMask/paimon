@@ -44,7 +44,11 @@ import org.apache.paimon.utils.Filter;
 import org.apache.paimon.utils.ListUtils;
 import org.apache.paimon.utils.Pair;
 import org.apache.paimon.utils.Range;
+import org.apache.paimon.utils.RowRangeIndex;
 import org.apache.paimon.utils.SnapshotManager;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
@@ -68,6 +72,8 @@ import static org.apache.paimon.utils.ThreadPoolUtils.randomlyOnlyExecute;
 /** Default implementation of {@link FileStoreScan}. */
 public abstract class AbstractFileStoreScan implements FileStoreScan {
 
+    private static final Logger LOG = LoggerFactory.getLogger(AbstractFileStoreScan.class);
+
     private final ManifestsReader manifestsReader;
     private final SnapshotManager snapshotManager;
     private final ManifestFile.Factory manifestFileFactory;
@@ -90,7 +96,7 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
 
     private ScanMetrics scanMetrics = null;
     private boolean dropStats;
-    @Nullable protected List<Range> rowRanges;
+    @Nullable protected RowRangeIndex rowRangeIndex = null;
     @Nullable protected Long limit;
 
     public AbstractFileStoreScan(
@@ -242,8 +248,25 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
 
     @Override
     public FileStoreScan withRowRanges(List<Range> rowRanges) {
-        this.rowRanges = rowRanges;
-        manifestsReader.withRowRanges(rowRanges);
+        if (rowRanges == null) {
+            this.rowRangeIndex = null;
+            manifestsReader.withRowRangeIndex(null);
+            return this;
+        }
+        this.rowRangeIndex = RowRangeIndex.create(rowRanges);
+        manifestsReader.withRowRangeIndex(this.rowRangeIndex);
+        return this;
+    }
+
+    @Override
+    public FileStoreScan withRowRangeIndex(RowRangeIndex rowRangeIndex) {
+        if (rowRangeIndex == null) {
+            this.rowRangeIndex = null;
+            manifestsReader.withRowRangeIndex(null);
+            return this;
+        }
+        this.rowRangeIndex = rowRangeIndex;
+        manifestsReader.withRowRangeIndex(rowRangeIndex);
         return this;
     }
 
@@ -277,9 +300,6 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
         List<ManifestFileMeta> manifests = manifestsResult.filteredManifests;
 
         Iterator<ManifestEntry> iterator = readManifestEntries(manifests, false);
-        if (supportsLimitPushManifestEntries()) {
-            iterator = limitPushManifestEntries(iterator);
-        }
 
         List<ManifestEntry> files = ListUtils.toList(iterator);
         if (postFilterManifestEntriesEnabled()) {
@@ -289,6 +309,10 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
         List<ManifestEntry> result = files;
 
         long scanDuration = (System.nanoTime() - started) / 1_000_000;
+        LOG.info(
+                "File store scan plan completed in {} ms. Files size : {}",
+                scanDuration,
+                result.size());
         if (scanMetrics != null) {
             long allDataFiles =
                     manifestsResult.allManifests.stream()
@@ -367,7 +391,13 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
         return readManifestEntries(readManifests().filteredManifests, true);
     }
 
-    protected Iterator<ManifestEntry> readManifestEntries(
+    @Override
+    public Iterator<ManifestEntry> readFileIterator(List<ManifestFileMeta> manifestFileMetas) {
+        // useSequential: reduce memory and iterator can be stopping
+        return readManifestEntries(manifestFileMetas, true);
+    }
+
+    public Iterator<ManifestEntry> readManifestEntries(
             List<ManifestFileMeta> manifests, boolean useSequential) {
         return scanMode == ScanMode.ALL
                 ? readAndMergeFileEntries(manifests, Function.identity(), useSequential)
@@ -436,14 +466,6 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
 
     protected boolean postFilterManifestEntriesEnabled() {
         return false;
-    }
-
-    protected boolean supportsLimitPushManifestEntries() {
-        return false;
-    }
-
-    protected Iterator<ManifestEntry> limitPushManifestEntries(Iterator<ManifestEntry> entries) {
-        throw new UnsupportedOperationException();
     }
 
     protected List<ManifestEntry> postFilterManifestEntries(List<ManifestEntry> entries) {

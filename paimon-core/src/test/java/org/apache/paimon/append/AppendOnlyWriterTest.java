@@ -41,6 +41,7 @@ import org.apache.paimon.manifest.FileSource;
 import org.apache.paimon.memory.HeapMemorySegmentPool;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.operation.BaseAppendFileStoreWrite;
+import org.apache.paimon.operation.BlobFileContext;
 import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.Schema;
@@ -675,6 +676,7 @@ public class AppendOnlyWriterTest {
                         null,
                         MIN_FILE_NUM,
                         targetFileSize,
+                        targetFileSize / 10 * 7,
                         false,
                         compactBefore -> {
                             latch.await();
@@ -710,7 +712,9 @@ public class AppendOnlyWriterTest {
                         MemorySize.MAX_VALUE,
                         new FileIndexOptions(),
                         true,
-                        false);
+                        false,
+                        options.dataEvolutionEnabled(),
+                        BlobFileContext.create(AppendOnlyWriterTest.SCHEMA, options));
         writer.setMemoryPool(
                 new HeapMemorySegmentPool(options.writeBufferSize(), options.pageSize()));
         return Pair.of(writer, compactManager.allFiles());

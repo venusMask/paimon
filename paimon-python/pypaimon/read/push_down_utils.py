@@ -16,10 +16,27 @@
 # limitations under the License.
 ################################################################################
 
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from pypaimon.common.predicate import Predicate
 from pypaimon.common.predicate_builder import PredicateBuilder
+
+
+def extract_partition_spec_from_predicate(
+    predicate: Predicate, partition_keys: List[str]
+) -> Optional[Dict[str, str]]:
+    if not predicate or not partition_keys:
+        return None
+    parts = _split_and(predicate)
+    spec: Dict[str, str] = {}
+    for p in parts:
+        if p.method != "equal" or p.field is None or p.literals is None or len(p.literals) != 1:
+            continue
+        if p.field in partition_keys:
+            spec[p.field] = str(p.literals[0])
+    if set(spec.keys()) == set(partition_keys):
+        return spec
+    return None
 
 
 def trim_and_transform_predicate(input_predicate: Predicate, all_fields: List[str], trimmed_keys: List[str]):
@@ -71,3 +88,39 @@ def _get_all_fields(predicate: Predicate) -> Set[str]:
         for sub_predicate in predicate.literals:
             involved_fields.update(_get_all_fields(sub_predicate))
     return involved_fields
+
+
+def remove_row_id_filter(predicate: Predicate) -> Optional[Predicate]:
+    from pypaimon.table.special_fields import SpecialFields
+
+    if not predicate:
+        return None
+    if predicate.field == SpecialFields.ROW_ID.name:
+        return None
+    if predicate.method == "and":
+        parts = _split_and(predicate)
+        non_row_id = [
+            p for p in parts
+            if _get_all_fields(p) != {SpecialFields.ROW_ID.name}
+        ]
+        if not non_row_id:
+            return None
+        filtered = []
+        for p in non_row_id:
+            r = remove_row_id_filter(p)
+            if r is None:
+                return None
+            filtered.append(r)
+        return PredicateBuilder.and_predicates(filtered)
+    if predicate.method == "or":
+        new_children = []
+        for c in predicate.literals or []:
+            r = remove_row_id_filter(c)
+            if r is not None:
+                new_children.append(r)
+        if not new_children:
+            return None
+        if len(new_children) == 1:
+            return new_children[0]
+        return PredicateBuilder.or_predicates(new_children)
+    return predicate

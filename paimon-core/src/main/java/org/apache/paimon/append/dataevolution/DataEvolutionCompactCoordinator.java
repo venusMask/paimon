@@ -24,11 +24,13 @@ import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.manifest.ManifestFileMeta;
+import org.apache.paimon.operation.FileStoreScan;
 import org.apache.paimon.partition.PartitionPredicate;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.source.EndOfScanException;
 import org.apache.paimon.table.source.ScanMode;
 import org.apache.paimon.table.source.snapshot.SnapshotReader;
+import org.apache.paimon.utils.Range;
 import org.apache.paimon.utils.RangeHelper;
 
 import javax.annotation.Nullable;
@@ -42,9 +44,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.TreeMap;
-import java.util.stream.Collectors;
 
 import static org.apache.paimon.format.blob.BlobFileFormat.isBlobFile;
+import static org.apache.paimon.manifest.ManifestFileMeta.allContainsRowId;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 
 /** Compact coordinator to compact data evolution table. */
@@ -70,7 +72,8 @@ public class DataEvolutionCompactCoordinator {
 
         this.scanner =
                 new CompactScanner(
-                        table.newSnapshotReader().withPartitionFilter(partitionPredicate));
+                        table.newSnapshotReader().withPartitionFilter(partitionPredicate),
+                        table.store().newScan());
         this.planner =
                 new CompactPlanner(compactBlob, targetFileSize, openFileCost, compactMinFileNum);
     }
@@ -89,31 +92,33 @@ public class DataEvolutionCompactCoordinator {
     /** Scanner to generate sorted ManifestEntries. */
     static class CompactScanner {
 
-        private final SnapshotReader snapshotReader;
+        private final FileStoreScan scan;
         private final Queue<List<ManifestFileMeta>> metas;
 
-        private CompactScanner(SnapshotReader snapshotReader) {
-            this.snapshotReader = snapshotReader;
+        private CompactScanner(SnapshotReader snapshotReader, FileStoreScan scan) {
+            this.scan = scan;
             Snapshot snapshot = snapshotReader.snapshotManager().latestSnapshot();
 
             List<ManifestFileMeta> manifestFileMetas =
                     snapshotReader.manifestsReader().read(snapshot, ScanMode.ALL).filteredManifests;
-            RangeHelper<ManifestFileMeta> rangeHelper =
-                    new RangeHelper<>(ManifestFileMeta::minRowId, ManifestFileMeta::maxRowId);
-            this.metas = new ArrayDeque<>(rangeHelper.mergeOverlappingRanges(manifestFileMetas));
+
+            if (allContainsRowId(manifestFileMetas)) {
+                RangeHelper<ManifestFileMeta> rangeHelper =
+                        new RangeHelper<>(
+                                manifest -> new Range(manifest.minRowId(), manifest.maxRowId()));
+                this.metas =
+                        new ArrayDeque<>(rangeHelper.mergeOverlappingRanges(manifestFileMetas));
+            } else {
+                this.metas = new ArrayDeque<>(Collections.singletonList(manifestFileMetas));
+            }
         }
 
         List<ManifestEntry> scan() {
             List<ManifestEntry> result = new ArrayList<>();
             while (metas.peek() != null && result.size() < FILES_BATCH) {
                 List<ManifestFileMeta> currentMetas = metas.poll();
-                List<ManifestEntry> targetEntries =
-                        currentMetas.stream()
-                                .flatMap(meta -> snapshotReader.readManifest(meta).stream())
-                                // we don't need stats for compaction
-                                .map(ManifestEntry::copyWithoutStats)
-                                .collect(Collectors.toList());
-                result.addAll(targetEntries);
+                scan.readFileIterator(currentMetas)
+                        .forEachRemaining(entry -> result.add(entry.copyWithoutStats()));
             }
             if (result.isEmpty()) {
                 throw new EndOfScanException();
@@ -156,9 +161,11 @@ public class DataEvolutionCompactCoordinator {
                 List<DataFileMeta> files = partitionFiles.getValue();
                 RangeHelper<DataFileMeta> rangeHelper =
                         new RangeHelper<>(
-                                DataFileMeta::nonNullFirstRowId,
-                                // merge adjacent files
-                                f -> f.nonNullFirstRowId() + f.rowCount());
+                                f ->
+                                        new Range(
+                                                f.nonNullFirstRowId(),
+                                                // merge adjacent files
+                                                f.nonNullFirstRowId() + f.rowCount()));
 
                 List<List<DataFileMeta>> ranges = rangeHelper.mergeOverlappingRanges(files);
 
@@ -196,10 +203,7 @@ public class DataEvolutionCompactCoordinator {
                     }
 
                     RangeHelper<DataFileMeta> rangeHelper2 =
-                            new RangeHelper<>(
-                                    DataFileMeta::nonNullFirstRowId,
-                                    // files group
-                                    f -> f.nonNullFirstRowId() + f.rowCount() - 1);
+                            new RangeHelper<>(DataFileMeta::nonNullRowIdRange);
                     List<List<DataFileMeta>> groupedFiles =
                             rangeHelper2.mergeOverlappingRanges(dataFiles);
                     List<DataFileMeta> waitCompactFiles = new ArrayList<>();

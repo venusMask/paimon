@@ -156,7 +156,9 @@ public abstract class ManifestFileMetaTestBase {
                                 null,
                                 null,
                                 CoreOptions.ExternalPathStrategy.NONE,
-                                false),
+                                null,
+                                false,
+                                null),
                         Long.MAX_VALUE,
                         null)
                 .create();
